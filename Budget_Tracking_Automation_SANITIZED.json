@@ -1,0 +1,539 @@
+{
+  "name": "Budget Tracking Automation",
+  "nodes": [
+    {
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyMinute"
+            }
+          ]
+        },
+        "filters": {
+          "q": "Debit Alert"
+        }
+      },
+      "id": "sanitized-node-001",
+      "name": "Gmail Trigger",
+      "type": "n8n-nodes-base.gmailTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        -32
+      ],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "SANITIZED_CREDENTIAL_ID_1",
+          "name": "SANITIZED gmailOAuth2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const email = $input.first().json;\nreturn [{\n  json: {\n    replyToEmail: email.from || null,\n    text: (email.text || email.snippet || '').trim(),\n    timestamp: new Date(email.date || Date.now()).toISOString()\n  }\n}];"
+      },
+      "id": "sanitized-node-002",
+      "name": "Code in JavaScript",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        224,
+        -32
+      ]
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ $json.text }}",
+        "options": {
+          "systemMessage": "You are a financial transaction parser for a UK personal budgeting system.\nRead the user's email about income or an expense and respond with ONLY a single JSON object as your final answer - no markdown, no code fences, no commentary before or after it - matching exactly this schema:\n{ \"type\": \"income\"|\"expense\", \"amount\": number, \"currency\": \"ISO 4217 code, default GBP if unstated or a £ symbol is used\", \"merchant_or_source\": string, \"category\": one of [\"Food\", \"Transport\", \"Housing\", \"Rent\", \"Utilities\", \"Healthcare\", \"Entertainment\", \"Shopping\", \"Investment\" ,\"Education \",\"Saving s\",\"Sala ry\",\"Business\", \"Travel\" ,\"Bills \",\"Insuranc e\",\"Subscriptio ns\",\"Fam ily\",\"Emerg ency\",\"Others\"], \"subcategory\": string|null, \"payment_method\": one of [\"Debit  Card\",\"Credit Card\",\" Bank Transfer\", \"Standing Order\", \"Direct  Debit\",\"Cash\", \"Apple Pay\", \"Google Pay\", \"PayPal\" ,\"Monzo Pot\", \"Savings Account \",\"Unknown\"], \"date\": \"DD/MM/YYYY, default today if unstated\", \"notes\": string|null, \"location\": string|null, \"confidence\": number between 0 and 1 }\n\nUse the Merchant Lookup tool when a merchant name is unfamiliar or ambiguous to confirm its correct UK category before answering. You do not need the tool for merchants you already recognise below.\n\nRecognise UK merchants directly: Tesco, Sainsbury's, ASDA, Morrisons, Aldi, Lidl, Waitrose -> Food; Amazon UK -> Shopping; Uber Eats, Deliveroo, Just Eat -> Food; Uber -> Transport; Trainline, TfL -> Transport; British Gas, Octopus Energy -> Utilities; EE, O2, Vodafone, Three, Sky, Virgin Media -> Bills; Netflix, Spotify, Apple, Google -> Subscriptions; PayPal -> infer underlying merchant from context.\nRecognise UK banks/accounts when mentioned: Barclays, HSBC, Lloyds, NatWest, Santander, Monzo, Starling Bank, Halifax, Nationwide, Revolut, Chase UK - populate as the account, not the category.\nIf the amount or currency cannot be determined with reasonable confidence, still return your best guess but set confidence below 0.5.\nYour entire response must be the JSON object and nothing else."
+        }
+      },
+      "id": "sanitized-node-003",
+      "name": "AI Agent",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 1.7,
+      "position": [
+        448,
+        -144
+      ],
+      "notes": "AI Agent / Chat Model / Memory node type identifiers change across n8n releases more than core nodes do. If import shows these as unrecognised, delete and re-add from the node panel (AI Agent / OpenAI Chat Model / Simple Memory), paste the system prompt back in, and reconnect the same four lines shown in the canvas - everything else in this workflow is unaffected."
+    },
+    {
+      "parameters": {
+        "model": "gpt-4.1-mini",
+        "options": {}
+      },
+      "id": "sanitized-node-004",
+      "name": "OpenAI Chat Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1,
+      "position": [
+        400,
+        112
+      ],
+      "credentials": {
+        "openAiApi": {
+          "id": "SANITIZED_CREDENTIAL_ID_2",
+          "name": "SANITIZED openAiApi"
+        }
+      },
+      "notes": "Swap for the Groq Chat Model node if you'd rather use Groq - same wiring, needs a Groq API credential instead."
+    },
+    {
+      "parameters": {
+        "sessionIdType": "customKey",
+        "sessionKey": "={{ $('Code in JavaScript').item.json.replyToEmail }}"
+      },
+      "id": "sanitized-node-005",
+      "name": "Simple Memory",
+      "type": "@n8n/n8n-nodes-langchain.memoryBufferWindow",
+      "typeVersion": 1.3,
+      "position": [
+        560,
+        128
+      ]
+    },
+    {
+      "parameters": {
+        "url": "=https://open.er-api.com/v6/latest/{{ (() => { const raw = $json.output || $json.text || ''; try { return JSON.parse(raw).currency || 'GBP'; } catch (e) { const m = raw.match(/currency[\"']?\\s*:\\s*[\"']([A-Z]{3})[\"']/); return m ? m[1] : 'GBP'; } })() }}",
+        "options": {}
+      },
+      "id": "sanitized-node-006",
+      "name": "HTTP Request",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        800,
+        -32
+      ],
+      "notes": "open.er-api.com is free, no API key. Called unconditionally (even when currency is already GBP, which returns rate 1.0) - removes the need for a separate currency-check branch."
+    },
+    {
+      "parameters": {
+        "jsCode": "const fx = $input.first().json;\nconst agentJson = $('AI Agent').item.json;\nconst agentRaw = agentJson.output || agentJson.text || '';\n\nlet parsed;\ntry {\n  parsed = JSON.parse(agentRaw);\n} catch (e) {\n  const match = agentRaw.match(/\\{[\\s\\S]*\\}/);\n  try { parsed = match ? JSON.parse(match[0]) : {}; } catch (e2) { parsed = {}; }\n}\n\nconst src = $('Code in JavaScript').item.json;\nconst rate = (fx.rates && fx.rates.GBP) || 1;\nconst amount = parsed.amount != null ? Number(parsed.amount) : 0;\n\nfunction uuidv4() {\n  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {\n    const r = Math.random() * 16 | 0;\n    const v = c === 'x' ? r : (r & 0x3 | 0x8);\n    return v.toString(16);\n  });\n}\n\nconst now = new Date();\nconst dateParts = String(parsed.date || now.toLocaleDateString('en-GB')).split('/');\nconst day = parseInt(dateParts[0], 10) || now.getDate();\nconst month = parseInt(dateParts[1], 10) || (now.getMonth() + 1);\nconst year = parseInt(dateParts[2], 10) || now.getFullYear();\nconst txDate = new Date(year, month - 1, day);\n\nconst monthNames = ['January','February','March','April','May','June','July','August','September','October','November','December'];\n\nfunction isoWeek(dt) {\n  const target = new Date(dt.valueOf());\n  const dayNr = (dt.getDay() + 6) % 7;\n  target.setDate(target.getDate() - dayNr + 3);\n  const firstThursday = target.valueOf();\n  target.setMonth(0, 1);\n  if (target.getDay() !== 4) { target.setMonth(0, 1 + ((4 - target.getDay()) + 7) % 7); }\n  return 1 + Math.ceil((firstThursday - target) / 604800000);\n}\n\nconst fyStart = new Date(year, 3, 6);\nconst fiscalYear = txDate >= fyStart ? (year + '/' + String(year + 1).slice(-2)) : ((year - 1) + '/' + String(year).slice(-2));\n\nconst roundedTimestamp = Math.floor(Date.now() / (1000 * 60 * 30));\nconst dedupHash = [src.replyToEmail, amount, parsed.merchant_or_source, roundedTimestamp].join('|');\n\nreturn [{\n  json: {\n    TransactionID: 'txn_' + uuidv4(),\n    Type: parsed.type === 'income' ? 'Income' : 'Expense',\n    Date: String(day).padStart(2,'0') + '/' + String(month).padStart(2,'0') + '/' + year,\n    Time: now.toTimeString().slice(0,5),\n    Week: isoWeek(txDate),\n    Month: monthNames[month - 1],\n    Year: year,\n    FiscalYear: fiscalYear,\n    Amount: amount,\n    Currency: parsed.currency || 'GBP',\n    ExchangeRate: rate,\n    AmountGBP: Math.round(amount * rate * 100) / 100,\n    Category: parsed.category || 'Others',\n    Subcategory: parsed.subcategory || '',\n    MerchantOrSource: parsed.merchant_or_source || 'Unknown',\n    PaymentMethod: parsed.payment_method || 'Unknown',\n    Account: parsed.account || '',\n    Notes: parsed.notes || '',\n    Location: parsed.location || '',\n    Channel: 'Email',\n    RawMessage: src.text || '',\n    Status: 'Confirmed',\n    ConfidenceScore: parsed.confidence != null ? parsed.confidence : 0,\n    DedupHash: dedupHash,\n    CreatedAt: now.toISOString(),\n    ExecutionID: $execution.id\n  }\n}];"
+      },
+      "id": "sanitized-node-007",
+      "name": "Code in JavaScript1",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1024,
+        -32
+      ]
+    },
+    {
+      "parameters": {
+        "sendTo": "redacted@example.com",
+        "subject": "Transaction logged",
+        "emailType": "text",
+        "message": "=Transaction successfully recorded.\n\nTransaction Details\n\nDate: {{ $json.Date }}\n\nBank: {{ $json.Bank }}\nTransaction Type: {{ $json.Type }}\nDescription: {{ $json.Description }}\nAmount: {{ $json.Currency || \"£\" }}{{ $json.Amount }}\n\nYour budget tracker has been updated successfully.\n\nThis is an automated notification from your AI Budget Tracking System.",
+        "options": {}
+      },
+      "id": "sanitized-node-008",
+      "name": "Send a message1",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        1472,
+        -32
+      ],
+      "webhookId": "03997b0e-1dfd-5947-8e23-bb0fcb2e8b2e",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "SANITIZED_CREDENTIAL_ID_3",
+          "name": "SANITIZED gmailOAuth2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "SANITIZED_SPREADSHEET_ID",
+          "mode": "list",
+          "cachedResultName": "SANITIZED_BUDGET_TRACKER",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/SANITIZED_SPREADSHEET_ID/edit"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "SANITIZED_SHEET_GID",
+          "mode": "list",
+          "cachedResultName": "Sheet1",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/SANITIZED_SPREADSHEET_ID/edit#gid=SANITIZED_SHEET_GID"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Date": "={{ $json.date || $json.Date }}",
+            "Bank": "={{ $json.description || $json.Description || \"\" }}",
+            "Merchant": "={{ $json.merchant || $json.Merchant || \"\" }}",
+            "Type": "={{ $json.type || $json.Type }}",
+            "Description": "={{ $json.description || $json.Description || \"\" }}",
+            "Amount": "={{ $json.amount || $json.Amount }}",
+            "Balance": "={{ $json.balance || $json.Balance || \"\" }}",
+            "Refrence": "={{ $json.reference || $json.Reference || \"\" }}",
+            "Category": "={{ $json.category || $json.Category || \"Uncategorized\" }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "Date",
+              "displayName": "Date",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Description",
+              "displayName": "Description",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Amount",
+              "displayName": "Amount",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Type",
+              "displayName": "Type",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Bank",
+              "displayName": "Bank",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Merchant",
+              "displayName": "Merchant",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Balance",
+              "displayName": "Balance",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Refrence",
+              "displayName": "Refrence",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Category",
+              "displayName": "Category",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "sanitized-node-009",
+      "name": "Append row in sheet",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        1248,
+        -32
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "SANITIZED_CREDENTIAL_ID_4",
+          "name": "SANITIZED googleSheetsOAuth2Api"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        -160,
+        336
+      ],
+      "id": "sanitized-node-010",
+      "name": "Error Trigger"
+    },
+    {
+      "parameters": {
+        "jsCode": "return [\n  {\n    json: {\n      subject: `🚨 Workflow Failed: ${$json.workflow?.name || 'Unknown Workflow'}`,\n      message: `\nWorkflow: ${$json.workflow?.name || 'Unknown'}\n\nNode:\n${$json.execution?.lastNodeExecuted || 'Unknown'}\n\nError:\n${$json.execution?.error?.message || 'No error message'}\n\nTime:\n${new Date().toISOString()}\n      `\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        64,
+        336
+      ],
+      "id": "sanitized-node-011",
+      "name": "Code in JavaScript2"
+    },
+    {
+      "parameters": {
+        "sendTo": "redacted@example.com",
+        "subject": "=🚨 n8n Workflow Error - {{ $workflow.name }}",
+        "message": "=<h2>🚨 Workflow Error</h2>  <p><strong>Workflow:</strong> {{ $workflow.name }}</p> <p><strong>Node:</strong> {{ $json.execution?.lastNodeExecuted || \"Unknown\" }}</p> <p><strong>Time:</strong> {{ $now }}</p>  <hr>  <h3>Error Details</h3>  <pre>{{ JSON.stringify($json, null, 2) }}</pre>",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        288,
+        336
+      ],
+      "id": "sanitized-node-012",
+      "name": "Send a message",
+      "webhookId": "fc5e6512-7eba-5fc5-ba99-0ad5e3e624f1",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "SANITIZED_CREDENTIAL_ID_5",
+          "name": "SANITIZED gmailOAuth2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "content": "User Alert get picked out from gmail",
+        "width": 432,
+        "color": 5
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        -80,
+        -64
+      ],
+      "typeVersion": 1,
+      "id": "sanitized-node-013",
+      "name": "Sticky Note"
+    },
+    {
+      "parameters": {
+        "content": "Agent send out the transaction logged to the Google sheet",
+        "height": 128,
+        "width": 480,
+        "color": 3
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        368,
+        -208
+      ],
+      "typeVersion": 1,
+      "id": "sanitized-node-014",
+      "name": "Sticky Note1"
+    },
+    {
+      "parameters": {
+        "content": "HTTP GET bank alert information from gmil and code node convert text to java script",
+        "height": 128,
+        "width": 608,
+        "color": 5
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        768,
+        -64
+      ],
+      "typeVersion": 1,
+      "id": "sanitized-node-015",
+      "name": "Sticky Note2"
+    },
+    {
+      "parameters": {
+        "content": "ERROR HANDLER: HANDLE ANY ERROR OCCURENCE IN THE NODES",
+        "width": 656,
+        "color": 2
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        -192,
+        288
+      ],
+      "typeVersion": 1,
+      "id": "sanitized-node-016",
+      "name": "Sticky Note3"
+    },
+    {
+      "parameters": {
+        "content": "Send Transaction summary to gmail",
+        "width": 336,
+        "color": 4
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        1424,
+        -80
+      ],
+      "typeVersion": 1,
+      "id": "sanitized-node-017",
+      "name": "Sticky Note4"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Gmail Trigger": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript": {
+      "main": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Agent": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Simple Memory": {
+      "ai_memory": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_memory",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript1": {
+      "main": [
+        [
+          {
+            "node": "Append row in sheet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Append row in sheet": {
+      "main": [
+        [
+          {
+            "node": "Send a message1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Error Trigger": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript2": {
+      "main": [
+        [
+          {
+            "node": "Send a message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false,
+    "timeSavedMode": "fixed",
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": "SANITIZED_ERROR_WORKFLOW_ID"
+  },
+  "versionId": "00000000-0000-4000-8000-000000000000",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "SANITIZED_INSTANCE_ID"
+  },
+  "nodeGroups": [],
+  "id": "SANITIZED_WORKFLOW_ID",
+  "tags": []
+}
